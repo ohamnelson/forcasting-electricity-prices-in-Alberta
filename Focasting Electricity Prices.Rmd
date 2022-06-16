@@ -304,20 +304,4 @@ Alberta Electric System Operator (2022). Glossary of Terms [online]. Available a
 Bourne, K. (2022, March 8). Alberta to stop collecting fuel tax, announces electricity rebates. Global News [online]. Available at: https://globalnews.ca/news/8664191/alberta-high-gas-prices-government-program/ (Accessed March 26, 2022).
 
 
-```{r}
-#Sys.setenv("plotly_username"="Oham_nelson")
-#Sys.setenv("plotly_api_key"="uglrUp5niqUmPAwn2psT")
-```
-
-
-```{r}
-#api_create(p, "Seaon_trend")
-
-
-```
-
-```{r}
-#api_create(price.series, "Price_trend") 
-#api_create(power.trend, "power.trend") 
-```
 
