@@ -1,0 +1,323 @@
+---
+title: "Forecasting Electricity Prices in Alberta"
+author: 'By: Oham Ugochukwu'
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+    always_allow_html: true
+---
+
+## Introduction
+In a modern age dependent on electricity, an increase in the price of energy creates a ripple effects which affects various sectors of the economy. During the recent months, prices across board have risen at a significant rate; to the point the Alberta government has stepped in and offered a $150 electricity rebate to help residents of the province save on bill increases they are expected to encounter (Bourne, 2022).
+
+The goal of this analysis is to determine electricity prices based on various factors. Forecasting future electricity prices not only helps businesses understand costs, but may also help Albertans save on their bills in the coming months. 
+
+This analysis will be guided by the following questions:
+
+1. How has the composition of electricity generated from different sources changed over time?
+2. Which time(s) of day/year see the highest electricity prices?
+3. What do trends from past data suggest about forecast future electricity prices?
+
+
+## Data
+
+The data for this analysis was sourced from the Alberta Electric System Operator (AESO). It is a public body subject to the Freedom of Information and Protection of Privacy Act (FOIP), which allows access to this information. Two datasets we downloaded; one covering generation data, and another containing electricity loads and pricing. These datasets were combined into one in order to build the model. The data includes hourly information from January, 2015 to February, 2022 and has numerical and categorical features. Variables of interest include peak demand periods, season, power generation data, electricity imports and load, as well as the price (in dollars per megawatt).
+
+### Loading necessary libraries
+
+```{r message=FALSE, warning=FALSE}
+library("tidyverse") # for data manipulation
+library("ggplot2") # data visualization
+library("imputeTS") # Inputing Na values
+library("viridis") # colours for visualization
+library("hrbrthemes")
+library("lubridate")
+library("zoo")
+library("plotly") # to add interactions to the visualizations
+library("reshape2") # to transpose the data using melt
+library("aTSA") # Dickey-Fuller test
+library("forecast") # Time series forecasting
+library("readxl")
+library("TTR") # for the run mean function
+library("htmlwidgets")
+```
+
+### Reading the excel file
+
+```{r}
+elect_data1 <- read_excel("/Users/ohamugochukwu/Desktop/MSc/Data 614/Project/Elect_Data.xlsx")
+
+# Checking the data type of all columns
+sapply(elect_data1,class)
+```
+
+## Data Wrangling
+Before commencing a time series analysis and modelling, we would have to get the data ready. Columns were converted to the right types, data was grouped, NA were interpolated etc.
+
+### Converting non-numeric columns to numeric
+
+```{r}
+elect_data1 <- elect_data1 %>% mutate_at(c(4:17), as.numeric)
+sapply(elect_data1,class)
+```
+
+### Converting the date column from character type to datetime type
+
+```{r}
+elect_data1$Date_Time = as.POSIXct(elect_data1$Date_Time, format = "%m/%d/%Y %I:%M:%S %p", tz="GMT")
+class(elect_data1$Date_Time)
+```
+
+For the purpose of this Analysis, I would be making an assumption that the price trend of electricity 5+ years ago would not affect the price today. Hence, I would be using only data for the last 5 years.
+
+```{r}
+elect_data1 <- elect_data1 %>% 
+  filter(Date_Time > as.POSIXct("2018-01-01 00:00:00", tz="GMT"))
+
+# Creating a column which contains only the month and year for each record
+elect_data1$Mon_yr <- as.yearmon(elect_data1$Date_Time, "%Y %m")
+
+# Grouping the data by month and year. 
+elect_data <- elect_data1[-1] %>%
+  group_by(Mon_yr) %>%
+  summarise_if(is.numeric,mean,na.rm = TRUE)
+
+# Using Kalman smoothing to impute missing values
+elect_data <- na_kalman(elect_data)
+```
+
+### Creating a dataframe grouped by date and seasons
+
+```{r}
+par(mfrow=c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+elect.data.box <- elect_data1[-1] %>%
+  group_by(Mon_yr, Season) %>%
+  summarise_if(is.numeric,mean,na.rm = TRUE)
+
+# Plotting the variation of Electricity Prices according to seaseons
+season.plot <- ggplot(elect.data.box, aes(Season, Price)) +
+  geom_boxplot() +
+  ggtitle("Price of Electricity per Season") +
+  theme(plot.title = element_text(hjust = 0.5))
+p = ggplotly(season.plot) 
+p
+```
+
+From the box-plot above, we can see the median price of electricity in summer months, is significantly higher than the median prices in winter months.
+
+### Plotting the changes in electricity prices over the last 5 years
+
+```{r}
+price.series <- ggplot(elect_data, aes(Mon_yr, Price, group = 1)) +
+  geom_point() +
+  geom_line() + 
+  theme(axis.text.x = element_text(angle = 90),
+        plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Electricity Price Trend")
+
+ggplotly(price.series)
+```
+
+### Transposing the data in order to plot power source trend
+
+```{r}
+elect_trans <- elect_data[,1:13]
+elect_trans <- melt(elect_trans, id.vars="Mon_yr")
+elect_trans <- elect_trans[order(elect_trans$Mon_yr),]
+```
+
+### plotting the trend of power source
+
+```{r}
+power.trend <- ggplot(elect_trans, aes(x=Mon_yr, y=value, fill = variable)) + 
+  geom_line(color = "blue")+
+  #scale_fill_viridis(discrete = TRUE)+
+  theme(legend.position = 'none')+
+  ggtitle("Power Generation Trend")+
+  theme_ipsum()+
+  theme(legend.position = "none", panel.spacing = unit(0.01, "lines"), 
+        strip.text.x = element_text(size = 6), axis.text.x = element_text(angle = 90),
+        plot.title = element_text(hjust = 0.5))+
+  facet_wrap(~variable, ncol = 3, scale='free_y')
+
+ggplotly(power.trend)
+```
+
+The power generation source trend shows a steady decline in the use of coal for electricity generation. Conversely, we can see a steady growth in the use of renewable's such as solar and wind for power generation. This could probably be attributed to Alberta's commitment to climate change.
+
+## Time Series Modelling
+
+For the modelling and forecasting of electricity prices in Alberta, I would be using the price column. The price column will be converted to a time series object with a frequency of 12 (monthly data).
+
+```{r}
+# Converting to a time series class
+price.ts = ts(elect_data$Price, frequency = 12)
+
+# Plotting the price time series object
+p = plot(price.ts, main = "Price over time", ylab = "Price" )
+#ggplotly(p)
+```
+
+From the plot of the price trend, we can see there is little to no trend, with a bit of seasonality.
+
+```{r}
+# Plotting a 2 Months Price Moving Average
+plot(runMean(price.ts, n = 2, cumulative = FALSE),
+     ylab = "Price",main = "Price 2 month moving average")
+```
+
+### Checking the Auto-correlation withing the timeseries
+
+```{r}
+par(mfrow=c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+#acf(price.ts)
+AutoCorrelation <- acf(price.ts, plot = FALSE)
+plot(AutoCorrelation, main = "Autocorrelation within Electricity Price")
+```
+
+From the acf plot, we can see that a significant amount of the lags lie above the dotted blue line, indicating the presence of autocorrelation in the data. Note: ACF is a function which gives the autocorrelation between a series and its lagged values.
+
+### Checking the Partial Autocorrelation
+```{r}
+par(mfrow=c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+p.AutoCorrelation <- pacf(price.ts, plot = FALSE)
+plot(p.AutoCorrelation, main = "Partial Autocorrelation within Electricity Price")
+#pacf(price.ts)
+```
+The partial autocorrelation (pacf) removes the correlations that are due to an indirect effect, and just focuses on direct effects.
+
+
+### Testing the price variable for Stationarity 
+for this, we would conduct a Dickey-Fuller test. A significant level $\alpha$ is set at 0.05.
+
+$H_{0}$ : Time series has a unit root (non-stationary).
+
+$H_{a}$ : Time series does not have a unit root (stationary)
+
+```{r}
+adf.test(price.ts)
+```
+From the result of the test conducted above, since the p-value of the lags in type 1 are above the level of significance: 0.05, we fail to reject the null hypothesis, and conclude that the time series is non-stationary.
+
+Since the ADF test conducted above indicates the time series is non-stationary, we would need to difference of the log of data. This will help to stabilize the mean of the data, by removing seasonality and trends in the data.
+
+```{r}
+adf.test(diff(log(price.ts)))
+```
+From the result of the ADF test on the difference of the log data, the p-values are below 0.05, so we reject the null hypothesis, and conclude it's stationary. Hence, we can proceed with a time series analysis of the data.
+
+### Plotting the ACF of the log difference of the timeseries
+```{r}
+par(mfrow=c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+#acf(price.ts)
+diff.AutoCorrelation <- acf(diff(log(price.ts)), plot = FALSE)
+plot(diff.AutoCorrelation, main = "Autocorrelation within log Difference of Price")
+#acf(diff(log(price.ts)))
+```
+From the acf plot of the log of differenced data, the acf quickly drops to zero, and majority of the points are within the dotted blue line, indicating the log difference data is stationary. 
+
+### Decomposing the time series object to view its trend and seasonality
+```{r}
+ggplotly(plot(decompose(price.ts)))
+```
+
+Decomposing the time series into its observed, trend and seasonal components, we could see the seasonality in the data. This will have to be accounted for in building the model.
+
+# Model Building
+For this analysis, I would be using an Arima model to fit the time series. An arima model has 2 major parts (AR,MA) In order to fit an Arima model, we could use the auto.arima function which generates the autoregressive (AR) and moving average (MA) values or we could programatically compute the AR and MA values by looking at the lags in the acf and pacf plots.
+
+```{r}
+par(mfrow=c(1,1), mar = c(5, 4, 4, 2) + 0.1)
+
+plot(diff.AutoCorrelation, main = "Autocorrelation within log Difference of Price")
+
+
+diff.p.AutoCorrelation <- pacf(diff(log(price.ts)), plot = FALSE)
+plot(diff.p.AutoCorrelation, main = "Partial Autocorrelation within log Difference of Price")
+
+
+# The pacf plot is suggestive of an AR(2) model
+
+```
+From the acf plot, the first lag below the blue line is the 3rd lag, this suggests an MA(3), while The pacf plot is suggestive of an AR(2) model. So initial candidate models are an ARIMA(2,1,0) and ARIMA(0,1,3).
+
+To get the best model, we will compute all the possible models ARIMA(p,1,q); p ≤ 2 and q ≤ 3, and pick the one with the smallest AIC value. 
+
+```{r}
+AIC1 = matrix(0,3,4)
+
+for (i in 1:3){ for (j in 1:4){
+    price.fit1 = arima((price.ts), order = c(i-1, 1,j-1))
+    AIC1[i,j] = AIC(price.fit1);}}
+
+AIC1
+
+(idxminA=which(AIC1 == min(AIC1), arr.ind = TRUE))
+```
+From the result above the model with the least AIC is the ARIMA(0,1,1)
+
+### Building an ARIMA(0,1,1) Model
+```{r}
+price.fit1.1 = arima((price.ts), c(0, 1, 1),seasonal = list(order = c(0, 1, 1), period = 12))
+
+summary(price.fit1.1)
+
+```
+
+### Using our ARIMA model to forecast electricity prices for 2 years
+```{r}
+price.predict1 = predict(price.fit1.1, 2*12)
+
+price.predict1$pred #these are the predicted logged values for 2 years into the future.
+
+```
+
+### Plotting the actual and predicted values
+```{r}
+#We can now plot our actual and predicted values:
+ggplotly(ts.plot(price.ts, price.predict1$pred,lty = c(1,3), main = "2 years Price forecast"))
+```
+
+From the plot of the forecasted electricity prices, we can see prices are set to have a slow but steady seasonal increase over the next 2 years, with a peak around January/February 2024. 
+### Modelling Using auto.arima
+```{r}
+price.fit2 = auto.arima(price.ts)
+summary(price.fit2)
+
+```
+From the summary of the auto.arima model above, ARIMA (0,1,1) was chosen as the best model, which corresponds to the model we chose looking at the pacf and acf plots.
+
+
+## Conclusion
+From the analysis, we were able to extract insights that are key in helping all Albertans understand energy prices. 
+
+It was determined that energy generation in the past couple of years has become less dependent on fossil based fuels as we see a large decrease in the use of Coal. Generation by Wind and solar has increased significantly while other sources of energy have remained relatively constant. Prices have been increasing over time, but we have no way of attributing these prices to changes in generation type.
+
+Furthermore, The median electricity price during summer is significantly higher than the median electricity price in winter. This could be as a result of numerous factors that are not captured in this dataset.
+
+Finally, Although the models may not be perfect, this analysis will help individuals and business owners in Alberta prepare for price fluctuations within the coming months, with an upward trend expected within the next 2 years
+
+## References
+Alberta Electric System Operator (2022). Glossary of Terms [online]. Available at: https://www.aeso.ca/aeso/glossary-of-terms/ (Accessed March 27, 2022).
+
+Bourne, K. (2022, March 8). Alberta to stop collecting fuel tax, announces electricity rebates. Global News [online]. Available at: https://globalnews.ca/news/8664191/alberta-high-gas-prices-government-program/ (Accessed March 26, 2022).
+
+
+```{r}
+#Sys.setenv("plotly_username"="Oham_nelson")
+#Sys.setenv("plotly_api_key"="uglrUp5niqUmPAwn2psT")
+```
+
+
+```{r}
+#api_create(p, "Seaon_trend")
+
+
+```
+
+```{r}
+#api_create(price.series, "Price_trend") 
+#api_create(power.trend, "power.trend") 
+```
+
